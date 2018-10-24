@@ -4,7 +4,35 @@
 #include <string.h>
 
 #define MASTER 0
+#define VISITED 1
+#define UNVISITED 0
+#define MAX_NUM_NODES 1000
+#define MAX_NUM_ARCS 100000
+#define MAX_FILE_SIZE 1567070885
+#define INF 18446744073709551615
 
+/* handles errors */
+void error_handler(char msg[], int error, int id){
+	static int bcast_id;
+	if(msg != NULL){
+		bcast_id = id;
+	}
+	MPI_Bcast(&error, 1, MPI_INT, bcast_id, MPI_COMM_WORLD);
+	if(error != 0){
+		if(id == 0){
+			printf("process %d exited with message: %s, code: %d\n\n", bcast_id, msg, error);
+		}
+		MPI_Finalize();
+		exit(error);
+	}
+}
+
+/* describes an arc */
+typedef struct {
+	int node_s, node_e, weight;
+}Arc;
+
+/* parse the input arguments */
 int parse_args(
 	int argc,
 	char *argv[],
@@ -15,9 +43,8 @@ int parse_args(
 	if(argc != 4){
 		return 1;
 	}
-	char leftover[50];
-	*start_node = (int) strtol(argv[1], &leftover, 10);
-	*end_node = (int) strtol(argv[2], &leftover, 10);
+	*start_node = atoi(argv[1]);
+	*end_node = atoi(argv[2]);
 	if(*start_node == *end_node){
 		return 2;
 	}
@@ -26,30 +53,75 @@ int parse_args(
 	return 0;
 }
 
-void main_master(int num_mpi_proc, int argc, char *argv[]){
-	size_t start_node, end_node;
-	char file_name[50];
-	int tag, error = parse_args(argc, argv, &start_node, &end_node, &file_name);
+/* read and parse the input file */
+void parse_file(char **am, int *num_arcs, FILE *fp){
+	char *buffer = (char*) malloc(MAX_FILE_SIZE), *end_ptr = buffer;
+	size_t bytes_read, current_line = 0;
+	bytes_read = fread(buffer, 1, MAX_FILE_SIZE, fp);
+	while(end_ptr != NULL && *end_ptr != '\0'){
+		/* read vertex 1 */
+		int node1 = (int) strtol(end_ptr, &end_ptr, 10);
 
+		/* read vertex 2 */
+		int node2 = (int) strtol(end_ptr, &end_ptr, 10);
+
+		if(node1 == 0 && node2 == 0){
+			break;
+		}
+
+		/* read weight */
+		int weight = (int) strtol(end_ptr, &end_ptr, 10);
+		
+		am[node1][node2] = weight;
+		++current_line;
+	}
+	*num_arcs = current_line;
+	free(buffer);
+}
+
+/* master process */
+void main_master(int num_mpi_proc, int argc, char *argv[]){
+	//vector of visitd nodes. 1 indicate visited, 0 unvisited
+	int *visited = (int*) calloc(MAX_NUM_NODES, sizeof(int));
+	size_t start_node, end_node;
+	char file_name[50], **am, *am_entries;
+	FILE *fp;
+		
+	int tag, error = parse_args(argc, argv, &start_node, &end_node, &file_name);
 	/* broadcast error code and handle it */
-	MPI_Bcast(&error, 1, MPI_INT, MASTER, MPI_COMM_WORLD);
-	if(error != 0){
-		printf("master exited with error code %d\n",error);
-		MPI_Finalize();
-		exit(error);
-	}	
+	error_handler("error while parsing args", error, MASTER);
+
+	/* initialize adjacency matrix */
+	am = (char**) malloc(sizeof(char*) * MAX_NUM_NODES);
+	am_entries = (char*) calloc(MAX_NUM_NODES*MAX_NUM_NODES,1); 
+	for(int i = 0, j = 0; i < MAX_NUM_NODES; ++i, j+=MAX_NUM_NODES){
+		am[i] = am_entries + j;
+	}
+
+	fp = fopen(file_name, "r");
+	/* check for error while opening file */
+	error = (fp == NULL ? 1 : 0);
+	error_handler("error opening file", error, MASTER);
+	int test;
+	parse_file(am, &test, fp);
+	fclose(fp);
+
+	printf("%d\n", test);
+	
+	free(visited);
+	free(am);
+	free(am_entries);
 }
 
 void main_worker(int num_mpi_proc, int mpi_rank){
-	int error = 1, tag;
+	int error, tag;
 	MPI_Status status;
 
 	/* check wether the arguments got accepted or not */
-	MPI_Bcast(&error, 1, MPI_INT, MASTER, MPI_COMM_WORLD);
-	if(error != 0){
-		MPI_Finalize();
-		exit(error);
-	}
+	error_handler(NULL, error, mpi_rank);
+
+	/* check if the file could be opened or not */
+	error_handler(NULL, error, mpi_rank);
 }
 
 int main(int argc, char *argv[]){

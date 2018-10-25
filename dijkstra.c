@@ -6,10 +6,13 @@
 #define MASTER 0
 #define VISITED 1
 #define UNVISITED 0
-#define MAX_NUM_NODES 1000
+#define MAX_NUM_NODES 10000
 #define MAX_NUM_ARCS 100000
 #define MAX_FILE_SIZE 1567070885
 #define INF 18446744073709551615
+
+int mpi_rank, num_mpi_proc;
+int num_nodes, **am, *am_entries;
 
 /* handles errors */
 void error_handler(char msg[], int error, int id){
@@ -36,8 +39,8 @@ typedef struct {
 int parse_args(
 	int argc,
 	char *argv[],
-	size_t *start_node,
-	size_t *end_node,
+	int *start_node,
+	int *end_node,
 	char *file_name[50]
 ){	
 	if(argc != 4){
@@ -54,61 +57,127 @@ int parse_args(
 }
 
 /* read and parse the input file */
-void parse_file(char **am, int *num_arcs, FILE *fp){
+void parse_file(int **am, FILE *fp){
 	char *buffer = (char*) malloc(MAX_FILE_SIZE), *end_ptr = buffer;
-	size_t bytes_read, current_line = 0;
-	bytes_read = fread(buffer, 1, MAX_FILE_SIZE, fp);
+	size_t bytes_read;
+	bytes_read = fread(buffer, 1, MAX_FILE_SIZE-1, fp);
+	num_nodes = 0;
 	while(end_ptr != NULL && *end_ptr != '\0'){
-		/* read vertex 1 */
+		/* read nodes and weight */
 		int node1 = (int) strtol(end_ptr, &end_ptr, 10);
-
-		/* read vertex 2 */
 		int node2 = (int) strtol(end_ptr, &end_ptr, 10);
-
+		int weight = (int) strtol(end_ptr, &end_ptr, 10);
 		if(node1 == 0 && node2 == 0){
 			break;
 		}
-
-		/* read weight */
-		int weight = (int) strtol(end_ptr, &end_ptr, 10);
-		
 		am[node1][node2] = weight;
-		++current_line;
+		if(node1+1 > num_nodes){
+			num_nodes = node1+1;
+		}else if(node2+1 > num_nodes){
+			num_nodes = node2+1;
+		}
 	}
-	*num_arcs = current_line;
 	free(buffer);
 }
 
+/* dijkstra */
+size_t dijkstra(const int start_node, int *end_node){
+	char is_visited[MAX_NUM_NODES];
+	size_t distance[MAX_NUM_NODES];
+	int previous_node[MAX_NUM_NODES];
+	size_t current_node_value;
+	int cheapest_path;
+
+	for(int i = mpi_rank; i < num_nodes; i+=num_mpi_proc){
+		is_visited[i] = 0;
+		distance[i] = am[start_node][i];
+		previous_node[i] = start_node;
+	}
+	is_visited[start_node]=1;
+	previous_node[start_node]=-1;
+
+	/* go through all nodes */
+	for(int j = 0; j < num_nodes; ++j){
+		current_node_value = INF;
+		
+		for(int i = mpi_rank; i < num_nodes; i+=num_mpi_proc){
+			if(is_visited[i] == 0 && distance[i] < current_node_value){
+				current_node_value = distance[i];
+				cheapest_path = i;
+			}
+		}
+
+		struct{
+			int current_node_value, cheapest_path;
+		}p, p_global;
+		p.current_node_value = current_node_value;
+		p.cheapest_path = cheapest_path;
+
+		MPI_Allreduce(&p, &p_global, 1, MPI_2INT, MPI_MINLOC, MPI_COMM_WORLD);
+
+		cheapest_path = p_global.cheapest_path;
+		distance[cheapest_path] = p_global.current_node_value;
+		is_visited[cheapest_path]=1;
+
+		for(int i = mpi_rank; i < num_nodes; i+=num_mpi_proc){
+			if(is_visited[i] == 0 && distance[i] > distance[cheapest_path] + am[cheapest_path][i]){
+				distance[i] = distance[cheapest_path] + am[cheapest_path][i];
+				previous_node[i] = cheapest_path;
+			}
+		}
+	}
+
+	if(mpi_rank == MASTER){
+		return distance[*end_node];
+	}
+	return 1;
+}
+
+struct{
+	int start_node, num_nodes;
+}args;
+
 /* master process */
 void main_master(int num_mpi_proc, int argc, char *argv[]){
-	//vector of visitd nodes. 1 indicate visited, 0 unvisited
-	int *visited = (int*) calloc(MAX_NUM_NODES, sizeof(int));
-	size_t start_node, end_node;
-	char file_name[50], **am, *am_entries;
+	int start_node, end_node;
+	char file_name[50];
 	FILE *fp;
-		
+	
 	int tag, error = parse_args(argc, argv, &start_node, &end_node, &file_name);
 	/* broadcast error code and handle it */
 	error_handler("error while parsing args", error, MASTER);
 
 	/* initialize adjacency matrix */
-	am = (char**) malloc(sizeof(char*) * MAX_NUM_NODES);
-	am_entries = (char*) calloc(MAX_NUM_NODES*MAX_NUM_NODES,1); 
+	am = (int**) malloc(sizeof(int*) * MAX_NUM_NODES);
+	am_entries = (int*) calloc(MAX_NUM_NODES*MAX_NUM_NODES,sizeof(int)); 
 	for(int i = 0, j = 0; i < MAX_NUM_NODES; ++i, j+=MAX_NUM_NODES){
 		am[i] = am_entries + j;
+	}
+	for(int i = 0; i < MAX_NUM_NODES*MAX_NUM_NODES; ++i){
+		am_entries[i] = 1001;
 	}
 
 	fp = fopen(file_name, "r");
 	/* check for error while opening file */
 	error = (fp == NULL ? 1 : 0);
 	error_handler("error opening file", error, MASTER);
-	int test;
-	parse_file(am, &test, fp);
+
+	parse_file(am, fp);
 	fclose(fp);
 
-	printf("%d\n", test);
+	/* broadcast the adjacency matrix */
+	MPI_Bcast(am_entries, MAX_NUM_NODES*MAX_NUM_NODES, MPI_INT, MASTER, MPI_COMM_WORLD);
+
+	args.start_node = start_node;
+	args.num_nodes = num_nodes;
+
+	/* broadcast the number of nodes in file, start node and end node */
+	MPI_Bcast(&args, 1, MPI_2INT, MASTER, MPI_COMM_WORLD);
+
+	size_t price = dijkstra(start_node, &end_node);
 	
-	free(visited);
+	printf("%lu\n", price);
+
 	free(am);
 	free(am_entries);
 }
@@ -120,14 +189,33 @@ void main_worker(int num_mpi_proc, int mpi_rank){
 	/* check wether the arguments got accepted or not */
 	error_handler(NULL, error, mpi_rank);
 
+	/* initialize adjacency matrix */
+	am = (int**) malloc(sizeof(int*) * MAX_NUM_NODES);
+	am_entries = (int*) calloc(MAX_NUM_NODES*MAX_NUM_NODES,sizeof(int)); 
+	for(int i = 0, j = 0; i < MAX_NUM_NODES; ++i, j+=MAX_NUM_NODES){
+		am[i] = am_entries + j;
+	}
+
 	/* check if the file could be opened or not */
 	error_handler(NULL, error, mpi_rank);
+
+	/* broadcast the adjacency matrix */
+	MPI_Bcast(am_entries, MAX_NUM_NODES*MAX_NUM_NODES, MPI_INT, MASTER, MPI_COMM_WORLD);
+
+	/* get the number of nodes in file and start node */
+	MPI_Bcast(&args, 1, MPI_2INT, MASTER, MPI_COMM_WORLD);
+	num_nodes = args.num_nodes;
+
+	/* start dijkstra */
+	dijkstra(args.start_node, NULL);
+
+	free(am);
+	free(am_entries);
 }
 
 int main(int argc, char *argv[]){
 	MPI_Init(&argc, &argv);
 	
-	int num_mpi_proc, mpi_rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &num_mpi_proc);
 	MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
 	

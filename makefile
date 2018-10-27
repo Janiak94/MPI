@@ -11,7 +11,7 @@ LIBS=-lmpi -pthread
 #dijkstra: dijkstra.c
 #	$(CC) $(STD) $(OFLAGS) $(LFLAG) $(LDIR) $(IDIR) $(LIBS) -o $@ $<
 
-dijkstra: dijkstraV2.c
+dijkstra: dijkstra.c
 	$(CC) $(STD) $(OFLAGS) $(LFLAG) $(LDIR) $(IDIR) $(LIBS) -o $@ $<
 
 clean:
